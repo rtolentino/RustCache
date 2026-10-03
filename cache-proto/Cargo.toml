@@ -1,0 +1,7 @@
+[package]
+name = "cache-proto"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+thiserror = { workspace = true }

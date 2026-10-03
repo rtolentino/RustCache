@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["cache-proto", "cache-server", "web-api"]
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+
+[workspace.dependencies]
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+thiserror = "1"

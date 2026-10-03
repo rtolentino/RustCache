@@ -1,0 +1,12 @@
+[package]
+name = "cache-server"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+cache-proto = { path = "../cache-proto" }
+tokio = { workspace = true }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures-util = { version = "0.3", features = ["sink"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }

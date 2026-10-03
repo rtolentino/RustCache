@@ -1,0 +1,21 @@
+[package]
+name = "web-api"
+edition.workspace = true
+version.workspace = true
+
+[dependencies]
+cache-proto = { path = "../cache-proto" }
+tokio = { workspace = true }
+axum = "0.7"
+axum-server = { version = "0.7", features = ["tls-rustls"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+thiserror = { workspace = true }
+utoipa = "5"
+utoipa-swagger-ui = { version = "8", features = ["axum"] }
+
+[dev-dependencies]
+cache-server = { path = "../cache-server" }
+reqwest = { version = "0.12", default-features = false, features = ["json"] }
