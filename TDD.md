@@ -1,6 +1,6 @@
 # RustCache – Technical Design Document
 
-_Last updated: 2026-10-03 (OpenAPI/Swagger added). Maintained via the `update-tdd` skill (`.github/skills/update-tdd/SKILL.md`); update it whenever code or design changes._
+_Last updated: 2026-10-03 (architecture and sequence diagrams added). Maintained via the `update-tdd` skill (`.github/skills/update-tdd/SKILL.md`); update it whenever code or design changes._
 
 ## 1. Overview
 
@@ -19,11 +19,48 @@ RustCache is a Redis-like in-memory cache written in Rust. It is two application
 
 ## 2. Architecture
 
+### 2.1 Application architecture
+
+```mermaid
+flowchart LR
+    Client["Client<br/>(browser / curl / Swagger UI)"]
+
+    subgraph WA["web-api (axum, rustls)"]
+        direction TB
+        TLS["HTTPS listener<br/>TLS_CERT / TLS_KEY"]
+        Router["Router + handlers<br/>validation, error mapping"]
+        Docs["OpenAPI /openapi.json<br/>Swagger UI /docs"]
+        Pool["CacheClient<br/>TCP pool (max 16 idle, 5s timeout)"]
+        TLS --> Router --> Pool
+        Router --- Docs
+    end
+
+    subgraph CS["cache-server (tokio)"]
+        direction TB
+        Listener["TCP listener<br/>semaphore: max connections"]
+        Conn["Connection task<br/>LinesCodec, idle timeout"]
+        Store[("Store<br/>16 mutex-guarded shards<br/>HashMap + TTL")]
+        Sweeper["Sweeper<br/>purge expired every 1s"]
+        Listener --> Conn --> Store
+        Sweeper --> Store
+    end
+
+    Proto[["cache-proto<br/>Command / Response, validation"]]
+
+    Client -- "HTTPS (JSON)" --> TLS
+    Pool -- "TCP text protocol" --> Listener
+    Router -.uses.-> Proto
+    Pool -.uses.-> Proto
+    Conn -.uses.-> Proto
 ```
-Client --HTTPS--> web-api --TCP (pooled)--> cache-server
-                                             |- TCP listener (tokio, task per connection)
-                                             |- Store: 16 mutex-guarded shards
-                                             '- Sweeper: purges expired keys every 1s
+
+### 2.2 Crate dependencies
+
+```mermaid
+flowchart TD
+    web-api --> cache-proto
+    cache-server --> cache-proto
+    web-api -. "dev-dependency (integration tests)" .-> cache-server
 ```
 
 | Crate | Responsibility |
@@ -31,6 +68,93 @@ Client --HTTPS--> web-api --TCP (pooled)--> cache-server
 | `cache-proto` | `Command`/`Response` types, parse/encode, key/value validation and size limits. No I/O. |
 | `cache-server` | `store` (data + TTL), `server` (accept loop, connection handling, shutdown), `main` (env config). |
 | `web-api` | `client` (TCP pool), `lib` (axum router, handlers, error mapping), `main` (TLS, shutdown). |
+
+### 2.3 Sequence diagrams
+
+**Write then read through the HTTPS API** (`PUT` then `GET` with TTL):
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor C as Client
+    participant W as web-api
+    participant P as CacheClient (pool)
+    participant S as cache-server
+    participant St as Store
+
+    C->>W: PUT /v1/keys/demo {"value":"hi","ttl_secs":30}
+    W->>W: validate key + value (cache-proto)
+    W->>P: execute(SET demo 30 hi)
+    P->>S: "SET demo 30 hi\n" (pooled or new TCP conn)
+    S->>St: execute(Set)
+    St-->>S: Ok
+    S-->>P: "OK\n"
+    P-->>W: Response::Ok
+    W-->>C: 204 No Content
+
+    C->>W: GET /v1/keys/demo
+    W->>P: execute(GET demo)
+    P->>S: "GET demo\n"
+    S->>St: execute(Get)
+    St-->>S: Value("hi")
+    S-->>P: "VALUE hi\n"
+    W->>P: execute(TTL demo)
+    P->>S: "TTL demo\n"
+    S-->>P: "INT 29\n"
+    W-->>C: 200 {"key":"demo","value":"hi","ttl_secs":29}
+```
+
+**Error paths** (missing key, cache unavailable):
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor C as Client
+    participant W as web-api
+    participant S as cache-server
+
+    C->>W: GET /v1/keys/missing
+    W->>S: GET missing
+    S-->>W: NIL
+    W-->>C: 404 {"error":"key not found"}
+
+    C->>W: GET /v1/keys/demo
+    W-xS: connect fails / 5s timeout
+    W-->>C: 502 or 504 {"error":"cache server ..."}
+```
+
+**TCP connection lifecycle and graceful shutdown** (cache-server):
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant X as TCP client
+    participant L as Accept loop
+    participant T as Connection task
+    participant St as Store
+    participant Sw as Sweeper
+    participant Sig as Shutdown signal
+
+    X->>L: connect
+    alt connection limit reached
+        L--xX: close immediately
+    else permit acquired
+        L->>T: spawn task
+        loop until EOF, idle timeout or shutdown
+            X->>T: command line
+            T->>St: parse + execute
+            T-->>X: reply line
+        end
+    end
+    loop every 1s
+        Sw->>St: purge_expired()
+    end
+    Sig->>L: shutdown
+    L->>T: watch(stop)
+    L->>Sw: watch(stop)
+    T-->>L: tasks drained
+    L-->>L: run() returns
+```
 
 ## 3. Wire protocol (cache-proto)
 

@@ -25,6 +25,7 @@ description: Write or rewrite TDD.md (the Technical Design Document) whenever co
    8. Testing strategy
    9. Open items / future work
    Add new sections for new components; remove content that no longer applies. Rewrite whole sections if incremental edits would leave them inconsistent.
+   Section 2 holds Mermaid diagrams (architecture, crate dependencies, sequence diagrams). Update them whenever components, flows, routes or error paths change, and keep the Mermaid syntax valid.
 3. Refresh the `_Last updated_` date line.
 4. Keep details consistent with `README.md` (command table, routes, env vars). Link to the README instead of duplicating long tables; update the README too if user-facing behaviour changed.
 5. Record design rationale and trade-offs (why, not just what), known limitations, and move completed items out of "Open items".
