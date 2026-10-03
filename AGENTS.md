@@ -31,6 +31,7 @@ Client --HTTPS--> web-api --TCP--> cache-server (in-memory store)
 - Keep the wire protocol parsing and the store in separate modules/crates so they are unit-testable without sockets.
 - Add unit tests for the store and protocol, and integration tests that start `cache-server` on an ephemeral port (and `web-api` against it).
 - Before finishing a change run: `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`.
+- Document every type, field, function and method with rustdoc (parameters under `# Arguments`, failures under `# Errors`).
 - Never commit secrets, private keys or certificates; load TLS material and addresses from config/env.
 
 ## Documentation

@@ -5,14 +5,22 @@ use std::hash::{Hash, Hasher};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+/// Number of independent shards; each has its own lock to reduce contention.
 const SHARDS: usize = 16;
 
+/// A stored value with its optional expiry time.
 struct Entry {
+    /// The stored value.
     value: String,
+    /// Instant after which the entry is considered gone; `None` means never.
     expires_at: Option<Instant>,
 }
 
 impl Entry {
+    /// Returns true if the entry's expiry is at or before `now`.
+    ///
+    /// # Arguments
+    /// * `now` - the instant to compare against.
     fn expired(&self, now: Instant) -> bool {
         self.expires_at.is_some_and(|t| t <= now)
     }
@@ -20,11 +28,17 @@ impl Entry {
 
 /// Sharded in-memory store with TTL support. Locks are never held across `.await`.
 pub struct Store {
+    /// Hash-partitioned maps, each behind its own mutex.
     shards: Vec<Mutex<HashMap<String, Entry>>>,
+    /// Key capacity of each shard (`max_keys` divided evenly, rounded up, at least 1).
     max_keys_per_shard: usize,
 }
 
 impl Store {
+    /// Creates an empty store.
+    ///
+    /// # Arguments
+    /// * `max_keys` - approximate total key limit, split evenly across shards.
     pub fn new(max_keys: usize) -> Self {
         Store {
             shards: (0..SHARDS).map(|_| Mutex::new(HashMap::new())).collect(),
@@ -32,6 +46,10 @@ impl Store {
         }
     }
 
+    /// Locks and returns the shard that owns `key`.
+    ///
+    /// # Arguments
+    /// * `key` - key whose hash selects the shard.
     fn shard(&self, key: &str) -> std::sync::MutexGuard<'_, HashMap<String, Entry>> {
         let mut h = DefaultHasher::new();
         key.hash(&mut h);
@@ -40,10 +58,23 @@ impl Store {
         self.shards[idx].lock().unwrap_or_else(|e| e.into_inner())
     }
 
+    /// Runs a command against the store using the current time.
+    ///
+    /// # Arguments
+    /// * `cmd` - the command to execute.
     pub fn execute(&self, cmd: Command) -> Response {
         self.execute_at(cmd, Instant::now())
     }
 
+    /// Runs a command with an explicit clock, which makes expiry deterministic in tests.
+    ///
+    /// Reply semantics: `GET` -> value or nil; `SET` -> ok or an error at the key limit;
+    /// `DEL`/`EXISTS`/`EXPIRE` -> 1 or 0; `TTL` -> seconds, -1 (no expiry) or -2 (missing);
+    /// `INCR` -> new value, or an error for non-integers, overflow or the key limit.
+    ///
+    /// # Arguments
+    /// * `cmd` - the command to execute.
+    /// * `now` - the instant treated as "current" when checking and setting expiry.
     pub fn execute_at(&self, cmd: Command, now: Instant) -> Response {
         match cmd {
             Command::Ping => Response::Pong,
@@ -146,6 +177,7 @@ impl Store {
         removed
     }
 
+    /// Number of stored entries, including expired ones not yet purged.
     pub fn len(&self) -> usize {
         self.shards
             .iter()
@@ -153,6 +185,7 @@ impl Store {
             .sum()
     }
 
+    /// True when no entries are stored.
     pub fn is_empty(&self) -> bool {
         self.len() == 0
     }

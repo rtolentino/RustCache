@@ -2,6 +2,11 @@ use cache_server::server::{run, Config};
 use std::time::Duration;
 use tokio::net::TcpListener;
 
+/// Reads an environment variable and parses it, falling back to a default.
+///
+/// # Arguments
+/// * `name` - environment variable name.
+/// * `default` - value used when the variable is unset or cannot be parsed.
 fn env_or<T: std::str::FromStr>(name: &str, default: T) -> T {
     std::env::var(name)
         .ok()
@@ -9,6 +14,8 @@ fn env_or<T: std::str::FromStr>(name: &str, default: T) -> T {
         .unwrap_or(default)
 }
 
+/// Starts the cache server. Configured by `CACHE_ADDR`, `CACHE_MAX_CONNECTIONS`,
+/// `CACHE_MAX_KEYS` and `CACHE_IDLE_TIMEOUT_SECS`; stops on Ctrl-C.
 #[tokio::main]
 async fn main() -> std::io::Result<()> {
     tracing_subscriber::fmt()

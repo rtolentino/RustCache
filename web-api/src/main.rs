@@ -4,6 +4,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use web_api::{app, client::CacheClient};
 
+/// Starts the web API. Configured by `WEB_ADDR`, `CACHE_ADDR`, `TLS_CERT`/`TLS_KEY`
+/// (or `WEB_ALLOW_HTTP=1` for development); Ctrl-C triggers a 10 s graceful shutdown.
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     tracing_subscriber::fmt()

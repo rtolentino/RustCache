@@ -1,6 +1,6 @@
 # RustCache – Technical Design Document
 
-_Last updated: 2026-10-03 (architecture and sequence diagrams added). Maintained via the `update-tdd` skill (`.github/skills/update-tdd/SKILL.md`); update it whenever code or design changes._
+_Last updated: 2026-10-03 (rustdoc coverage documented). Maintained via the `update-tdd` skill (`.github/skills/update-tdd/SKILL.md`); update it whenever code or design changes._
 
 ## 1. Overview
 
@@ -155,6 +155,10 @@ sequenceDiagram
     T-->>L: tasks drained
     L-->>L: run() returns
 ```
+
+### 2.4 Code documentation
+
+Every type, enum variant, struct field, function and method (public and private) has a rustdoc comment; functions list their parameters (`# Arguments`) and failure modes (`# Errors`) where relevant. Generate the browsable reference with `cargo doc --workspace --no-deps --document-private-items --open`. Doc comments on the API handlers and JSON body types also feed the OpenAPI spec, so keep them user-facing.
 
 ## 3. Wire protocol (cache-proto)
 

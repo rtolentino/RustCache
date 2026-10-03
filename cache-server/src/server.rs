@@ -9,15 +9,21 @@ use tokio::sync::{watch, Semaphore};
 use tokio_util::codec::{Framed, LinesCodec, LinesCodecError};
 use tracing::{debug, info, warn};
 
+/// Runtime settings for the TCP server.
 #[derive(Clone, Debug)]
 pub struct Config {
+    /// Maximum simultaneous client connections; extra connections are dropped.
     pub max_connections: usize,
+    /// Approximate maximum number of stored keys.
     pub max_keys: usize,
+    /// A connection with no request for this long is closed.
     pub idle_timeout: Duration,
+    /// How often expired keys are purged in the background.
     pub sweep_interval: Duration,
 }
 
 impl Default for Config {
+    /// 1024 connections, 1,000,000 keys, 300 s idle timeout, 1 s sweep interval.
     fn default() -> Self {
         Config {
             max_connections: 1024,
@@ -29,6 +35,11 @@ impl Default for Config {
 }
 
 /// Serves until `shutdown` resolves, then stops accepting and drains open connections.
+///
+/// # Arguments
+/// * `listener` - bound TCP listener to accept clients on.
+/// * `config` - server limits and timings.
+/// * `shutdown` - future that completes when the server should stop (e.g. Ctrl-C).
 pub async fn run(listener: TcpListener, config: Config, shutdown: impl Future<Output = ()>) {
     let store = Arc::new(Store::new(config.max_keys));
     let permits = Arc::new(Semaphore::new(config.max_connections));
@@ -80,6 +91,14 @@ pub async fn run(listener: TcpListener, config: Config, shutdown: impl Future<Ou
     let _ = sweeper.await;
 }
 
+/// Reads request lines from one client and writes one reply per line until the client
+/// disconnects, idles out, sends an oversized line, or shutdown is signalled.
+///
+/// # Arguments
+/// * `stream` - the accepted client socket.
+/// * `store` - shared store the commands run against.
+/// * `idle` - maximum time to wait for the next request.
+/// * `stop` - becomes changed when the server is shutting down.
 async fn handle_connection(
     stream: TcpStream,
     store: Arc<Store>,

@@ -9,58 +9,96 @@
 
 use thiserror::Error;
 
+/// Maximum key length in bytes.
 pub const MAX_KEY_LEN: usize = 256;
+/// Maximum value length in bytes (1 MiB).
 pub const MAX_VALUE_LEN: usize = 1024 * 1024;
 /// Upper bound for a whole request line.
 pub const MAX_LINE_LEN: usize = MAX_VALUE_LEN + MAX_KEY_LEN + 64;
 
+/// A request sent from a client to the cache server.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Command {
+    /// Liveness check; replies `PONG`.
     Ping,
+    /// Read the value stored under the key.
     Get(String),
+    /// Store a value, replacing any existing one.
     Set {
+        /// Key to write.
         key: String,
+        /// Value to store (no CR/LF, at most [`MAX_VALUE_LEN`] bytes).
         value: String,
+        /// Time to live in seconds; `None` means the key never expires.
         ttl_secs: Option<u64>,
     },
+    /// Delete the key.
     Del(String),
+    /// Check whether the key exists and has not expired.
     Exists(String),
+    /// Set a new time to live on an existing key.
     Expire {
+        /// Key to update.
         key: String,
+        /// New time to live in seconds from now.
         secs: u64,
     },
+    /// Remaining time to live of the key.
     Ttl(String),
+    /// Increment the integer value of the key by one.
     Incr(String),
 }
 
+/// A reply sent from the cache server to a client (one line on the wire).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Response {
+    /// The command succeeded and returns no data (`OK`).
     Ok,
+    /// Reply to [`Command::Ping`] (`PONG`).
     Pong,
+    /// A stored value (`VALUE <v>`).
     Value(String),
+    /// The key does not exist (`NIL`).
     Nil,
+    /// An integer result such as a count, TTL or counter value (`INT <n>`).
     Int(i64),
+    /// The command failed; carries a human-readable message (`ERR <msg>`).
     Err(String),
 }
 
+/// Errors produced while parsing or validating protocol data.
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ProtoError {
+    /// The request line was blank.
     #[error("empty command")]
     Empty,
+    /// The command name is not supported; carries the name as received.
     #[error("unknown command '{0}'")]
     UnknownCommand(String),
+    /// Missing or extra arguments; carries the command name.
     #[error("wrong number of arguments for '{0}'")]
     Arity(&'static str),
+    /// Key is empty, too long, or contains whitespace/control characters.
     #[error("invalid key")]
     InvalidKey,
+    /// Value is too long or contains CR/LF.
     #[error("value too large or contains line breaks")]
     InvalidValue,
+    /// A numeric argument could not be parsed.
     #[error("invalid integer")]
     InvalidInteger,
+    /// A reply line did not match any known response form.
     #[error("malformed response")]
     BadResponse,
 }
 
+/// Checks a key against the protocol rules.
+///
+/// # Arguments
+/// * `key` - candidate key; must be 1..=[`MAX_KEY_LEN`] bytes with no whitespace or control characters.
+///
+/// # Errors
+/// [`ProtoError::InvalidKey`] if any rule is violated.
 pub fn validate_key(key: &str) -> Result<(), ProtoError> {
     if key.is_empty()
         || key.len() > MAX_KEY_LEN
@@ -71,6 +109,13 @@ pub fn validate_key(key: &str) -> Result<(), ProtoError> {
     Ok(())
 }
 
+/// Checks a value against the protocol rules.
+///
+/// # Arguments
+/// * `value` - candidate value; at most [`MAX_VALUE_LEN`] bytes and no `\r` or `\n`.
+///
+/// # Errors
+/// [`ProtoError::InvalidValue`] if any rule is violated.
 pub fn validate_value(value: &str) -> Result<(), ProtoError> {
     if value.len() > MAX_VALUE_LEN || value.contains(['\r', '\n']) {
         return Err(ProtoError::InvalidValue);
@@ -78,6 +123,10 @@ pub fn validate_value(value: &str) -> Result<(), ProtoError> {
     Ok(())
 }
 
+/// Splits off the first whitespace-delimited word; returns `(word, rest)` with leading blanks of `rest` removed.
+///
+/// # Arguments
+/// * `s` - input text; leading whitespace is ignored.
 fn split_word(s: &str) -> (&str, &str) {
     let s = s.trim_start();
     match s.find(char::is_whitespace) {
@@ -86,6 +135,14 @@ fn split_word(s: &str) -> (&str, &str) {
     }
 }
 
+/// Parses the arguments of a command that takes exactly one key.
+///
+/// # Arguments
+/// * `rest` - text after the command name.
+/// * `name` - command name used in the arity error.
+///
+/// # Errors
+/// [`ProtoError::Arity`] for a missing or extra argument, [`ProtoError::InvalidKey`] for a bad key.
 fn key_only(rest: &str, name: &'static str) -> Result<String, ProtoError> {
     let (key, extra) = split_word(rest);
     if key.is_empty() || !extra.trim().is_empty() {
@@ -95,11 +152,25 @@ fn key_only(rest: &str, name: &'static str) -> Result<String, ProtoError> {
     Ok(key.to_string())
 }
 
+/// Parses an unsigned integer argument.
+///
+/// # Arguments
+/// * `s` - decimal text.
+///
+/// # Errors
+/// [`ProtoError::InvalidInteger`] if `s` is not a valid `u64`.
 fn parse_u64(s: &str) -> Result<u64, ProtoError> {
     s.parse().map_err(|_| ProtoError::InvalidInteger)
 }
 
 impl Command {
+    /// Parses one request line into a command. Command names are case-insensitive.
+    ///
+    /// # Arguments
+    /// * `line` - request line; a trailing `\r\n` or `\n` is ignored.
+    ///
+    /// # Errors
+    /// [`ProtoError`] for blank lines, unknown commands, wrong arity, bad keys/values or bad integers.
     pub fn parse(line: &str) -> Result<Command, ProtoError> {
         let line = line.trim_end_matches(['\r', '\n']);
         let (name, rest) = split_word(line);
@@ -149,6 +220,9 @@ impl Command {
     }
 
     /// Encodes the command as a single line without the trailing newline.
+    /// Encodes the command as a single request line (without the trailing newline).
+    ///
+    /// The caller must have validated keys and values; this does not re-check them.
     pub fn encode(&self) -> String {
         match self {
             Command::Ping => "PING".into(),
@@ -171,6 +245,8 @@ impl Command {
 }
 
 impl Response {
+    /// Encodes the response as a single reply line (without the trailing newline).
+    /// CR/LF inside error messages are replaced with spaces.
     pub fn encode(&self) -> String {
         match self {
             Response::Ok => "OK".into(),
@@ -182,6 +258,13 @@ impl Response {
         }
     }
 
+    /// Parses one reply line.
+    ///
+    /// # Arguments
+    /// * `line` - reply line; a trailing `\r\n` or `\n` is ignored.
+    ///
+    /// # Errors
+    /// [`ProtoError::BadResponse`] for an unknown reply kind, [`ProtoError::InvalidInteger`] for a bad `INT` payload.
     pub fn parse(line: &str) -> Result<Response, ProtoError> {
         let line = line.trim_end_matches(['\r', '\n']);
         let (kind, rest) = match line.split_once(' ') {

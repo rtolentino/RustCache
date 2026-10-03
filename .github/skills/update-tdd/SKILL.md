@@ -29,7 +29,8 @@ description: Write or rewrite TDD.md (the Technical Design Document) whenever co
 3. Refresh the `_Last updated_` date line.
 4. Keep details consistent with `README.md` (command table, routes, env vars). Link to the README instead of duplicating long tables; update the README too if user-facing behaviour changed.
 5. Record design rationale and trade-offs (why, not just what), known limitations, and move completed items out of "Open items".
-6. Verify: every limit, default, route, env var and error code stated in TDD.md exists in code (use grep). Fix any mismatch.
+6. Ensure every new or changed type, field, function and method has a rustdoc comment with its parameters (`# Arguments`) and errors; verify with `RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --document-private-items`.
+7. Verify: every limit, default, route, env var and error code stated in TDD.md exists in code (use grep). Fix any mismatch.
 
 ## Style
 - Concise, factual, present tense; tables and short bullets over prose.
