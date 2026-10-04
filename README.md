@@ -32,6 +32,8 @@ curl --cacert certs/cert.pem https://localhost:8443/v1/keys/demo
 | `CACHE_ADDR` | both (listen / upstream) | `127.0.0.1:6380` |
 | `CACHE_MAX_CONNECTIONS` | cache-server | `1024` |
 | `CACHE_MAX_KEYS` | cache-server | `1000000` |
+| `CACHE_MAX_MEMORY_BYTES` | cache-server | `268435456` (256 MiB) |
+| `CACHE_EVICTION_POLICY` | cache-server | `allkeys-lru` (or `noeviction`) |
 | `CACHE_IDLE_TIMEOUT_SECS` | cache-server | `300` |
 | `WEB_ADDR` | web-api | `127.0.0.1:8443` |
 | `TLS_CERT`, `TLS_KEY` | web-api | required (PEM paths) |
@@ -54,6 +56,18 @@ values are the rest of the line, with no CR/LF (max 1 MiB). Commands are case-in
 | `INCR <key>` | `INT <n>` |
 
 Errors reply `ERR <message>`. This is not RESP; Redis clients are not compatible.
+
+## Memory limits and eviction
+
+Memory is accounted per entry as key bytes + value bytes + 64 bytes of overhead, and capped by `CACHE_MAX_MEMORY_BYTES`
+(and `CACHE_MAX_KEYS`). When a write does not fit:
+
+- `allkeys-lru` (default): expired keys are dropped first, then the least recently used keys are evicted until it fits.
+  `GET`, `SET` and `INCR` count as use.
+- `noeviction`: the write fails with `ERR out of memory: ...` (HTTP 422 through the API) and existing data is untouched.
+
+The limits are split evenly across 16 shards, so eviction is per shard and can start slightly before the global totals are reached.
+An entry larger than a shard's budget is always rejected. An invalid `CACHE_EVICTION_POLICY` stops the server at startup.
 
 ## HTTPS API
 

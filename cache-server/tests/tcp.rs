@@ -69,3 +69,59 @@ async fn rejects_connections_over_limit() {
     stop.send(()).unwrap();
     handle.await.unwrap();
 }
+
+#[tokio::test]
+async fn lru_eviction_keeps_server_within_memory_limit() {
+    let cfg = Config {
+        max_memory_bytes: 16 * 1024,
+        ..Config::default()
+    };
+    let (addr, stop, handle) = start(cfg).await;
+    let mut c = BufReader::new(TcpStream::connect(&addr).await.unwrap());
+    let value = "v".repeat(100);
+    for i in 0..500 {
+        assert_eq!(
+            roundtrip(&mut c, &format!("SET key{i} - {value}")).await,
+            "OK"
+        );
+    }
+    let mut present = 0;
+    for i in 0..500 {
+        if roundtrip(&mut c, &format!("GET key{i}"))
+            .await
+            .starts_with("VALUE")
+        {
+            present += 1;
+        }
+    }
+    // ~170 bytes per entry against a 16 KiB budget: far fewer than 500 survive, but some do.
+    assert!(present > 0 && present < 150, "present = {present}");
+    assert!(roundtrip(&mut c, "GET key499").await.starts_with("VALUE"));
+    stop.send(()).unwrap();
+    handle.await.unwrap();
+}
+
+#[tokio::test]
+async fn noeviction_returns_error_when_memory_full() {
+    let cfg = Config {
+        max_memory_bytes: 16 * 1024,
+        eviction_policy: cache_server::store::EvictionPolicy::NoEviction,
+        ..Config::default()
+    };
+    let (addr, stop, handle) = start(cfg).await;
+    let mut c = BufReader::new(TcpStream::connect(&addr).await.unwrap());
+    let value = "v".repeat(100);
+    let mut errors = 0;
+    for i in 0..500 {
+        if roundtrip(&mut c, &format!("SET key{i} - {value}"))
+            .await
+            .starts_with("ERR out of memory")
+        {
+            errors += 1;
+        }
+    }
+    assert!(errors > 0);
+    assert!(roundtrip(&mut c, "GET key0").await.starts_with("VALUE"));
+    stop.send(()).unwrap();
+    handle.await.unwrap();
+}

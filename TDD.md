@@ -1,6 +1,6 @@
 # RustCache – Technical Design Document
 
-_Last updated: 2026-10-03 (rustdoc coverage documented). Maintained via the `update-tdd` skill (`.github/skills/update-tdd/SKILL.md`); update it whenever code or design changes._
+_Last updated: 2026-10-03 (LRU eviction and byte-based memory limits). Maintained via the `update-tdd` skill (`.github/skills/update-tdd/SKILL.md`); update it whenever code or design changes._
 
 ## 1. Overview
 
@@ -11,11 +11,11 @@ RustCache is a Redis-like in-memory cache written in Rust. It is two application
 
 ### Goals
 - Low-latency in-memory key/value cache with TTLs.
-- Safe, bounded resource usage (connections, keys, key/value sizes, line length).
+- Safe, bounded resource usage (connections, keys, memory bytes with LRU eviction, key/value sizes, line length).
 - Clean separation: protocol, store, transport, HTTP API.
 
 ### Non-goals (currently)
-- Redis RESP compatibility, persistence, replication/clustering, authentication on the TCP port, eviction policies (LRU/LFU).
+- Redis RESP compatibility, persistence, replication/clustering, authentication on the TCP port, other eviction policies (LFU, random, TTL-based).
 
 ## 2. Architecture
 
@@ -175,14 +175,43 @@ Design note: a text protocol was chosen for simplicity and debuggability (e.g. `
 
 ## 4. Store (cache-server/src/store.rs)
 
-- `Vec<Mutex<HashMap<String, Entry>>>` with 16 shards chosen by `DefaultHasher`; `Entry { value, expires_at: Option<Instant> }`.
+- 16 shards chosen by `DefaultHasher`; each is a `Mutex<Shard>` where `Shard { map: LruCache<String, Entry>, used: usize }` (the `lru` crate, unbounded; limits are enforced by the store). `Entry { value, expires_at: Option<Instant> }`.
 - Std mutexes, never held across `.await`; poisoned locks are recovered (map stays consistent).
 - **Expiry**: lazy (checked on read/write) plus background `purge_expired` sweep every `sweep_interval` (1s).
-- **Capacity**: `max_keys` split evenly per shard. A `SET`/`INCR` creating a new key at capacity first drops expired entries in that shard, then fails with `ERR out of memory: key limit reached`. There is no eviction.
 - **TTL semantics**: `TTL` returns remaining seconds rounded up, `-1` no expiry, `-2` missing/expired. `INCR` creates missing keys at 1, preserves existing TTL, errors on non-integers and overflow.
 - Time is injectable (`execute_at`) for deterministic tests.
 
-Known limitation: the key limit counts keys, not bytes, so memory is bounded only by `max_keys * 1 MiB` worst case.
+### 4.1 Memory accounting and limits
+- Entry size = key bytes + value bytes + `ENTRY_OVERHEAD` (64, an estimate of per-entry bookkeeping). `Shard.used` is updated on every insert, replace, delete, expiry and eviction; `Store::used_memory()` sums it.
+- Limits: `max_memory_bytes` and `max_keys`, each divided evenly across shards (rounded up, minimum 1). An entry bigger than the shard byte budget is always rejected (`ERR out of memory: entry is larger than the memory limit`).
+- Accounting is an approximation of heap use (allocator and hash-table overhead are not measured), so size `CACHE_MAX_MEMORY_BYTES` below the process's real memory budget.
+
+### 4.2 Eviction policy
+`EvictionPolicy` (`CACHE_EVICTION_POLICY`):
+
+| Policy | Behaviour when a write does not fit |
+|---|---|
+| `allkeys-lru` (default) | `make_room`: purge expired entries in the shard, then pop least-recently-used entries until the new entry fits; each pop increments `Store::evicted_keys()`. |
+| `noeviction` | After purging expired entries, reject with `ERR out of memory: memory or key limit reached` (HTTP 422). Existing data is unchanged, including the old value of a key being overwritten. |
+
+Recency: `GET`, `SET` and `INCR` promote a key; `EXISTS`, `TTL`, `EXPIRE` do not. Writes replacing an existing key are checked against the net change in size.
+
+```mermaid
+flowchart TD
+    W["SET / INCR (new or changed entry)"] --> Big{"size > shard byte limit?"}
+    Big -- yes --> E1["ERR entry larger than memory limit"]
+    Big -- no --> Rm["remove old value of the key (if any)"]
+    Rm --> Fit{"fits in bytes and key count?"}
+    Fit -- yes --> Put["insert, update used bytes"]
+    Fit -- no --> Pg["purge expired entries (once)"]
+    Pg --> Fit2{"fits now?"}
+    Fit2 -- yes --> Put
+    Fit2 -- no --> Pol{"policy"}
+    Pol -- "allkeys-lru" --> Ev["pop least recently used, count eviction"] --> Fit2
+    Pol -- "noeviction" --> Rs["restore old value"] --> E2["ERR out of memory"]
+```
+
+Known limitations: eviction is shard-local (a hot shard can evict while others have space); purging expired entries scans a shard (O(n) under its lock, only when under pressure and on the sweep); there is no `INFO`/metrics command yet to read `used_memory`/`evicted_keys` remotely.
 
 ## 5. TCP server (cache-server/src/server.rs)
 
@@ -191,7 +220,7 @@ Known limitation: the key limit counts keys, not bytes, so memory is bounded onl
 - **Limits**: `max_connections` via semaphore (excess connections are dropped immediately), per-connection idle timeout.
 - **Graceful shutdown**: on the shutdown future, stop accepting, signal connections and the sweeper via a `watch` channel, and wait for them to finish.
 - Malformed commands reply `ERR ...` and keep the connection open.
-- Configuration (env): `CACHE_ADDR`, `CACHE_MAX_CONNECTIONS`, `CACHE_MAX_KEYS`, `CACHE_IDLE_TIMEOUT_SECS`.
+- Configuration (env): `CACHE_ADDR`, `CACHE_MAX_CONNECTIONS`, `CACHE_MAX_KEYS`, `CACHE_MAX_MEMORY_BYTES`, `CACHE_EVICTION_POLICY`, `CACHE_IDLE_TIMEOUT_SECS`. An unparsable `CACHE_EVICTION_POLICY` aborts startup; other unparsable values fall back to defaults.
 
 ## 6. Web API (web-api)
 
@@ -210,7 +239,7 @@ The spec is generated from code: handlers carry `#[utoipa::path]` annotations, r
 |---|---|
 | Invalid key/value/body | 400 |
 | Missing key | 404 |
-| Cache replied `ERR` (e.g. INCR on text, key limit) | 422 |
+| Cache replied `ERR` (e.g. INCR on text, out of memory) | 422 |
 | Cache unreachable / bad reply | 502 |
 | Cache timeout | 504 |
 | `/healthz` with cache down | 503 |
@@ -229,13 +258,13 @@ HTTPS via `axum-server` + rustls using PEM files from `TLS_CERT`/`TLS_KEY`. The 
 
 ## 8. Testing strategy
 
-- Unit tests: protocol parsing/roundtrips, store semantics (TTL via injected time, INCR, limits).
+- Unit tests: protocol parsing/roundtrips, store semantics (TTL via injected time, INCR, memory accounting, LRU order, multi-eviction, expired-first, noeviction rollback, oversized entries, key limit).
 - Integration tests: `cache-server/tests/tcp.rs` (commands, partial writes, expiry, connection limit, graceful shutdown); `web-api/tests/api.rs` (full stack on ephemeral ports, cache-down behaviour, OpenAPI spec and Swagger UI served).
 - Gate: `cargo fmt --all`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace`.
 
 ## 9. Open items / future work
 
-- Eviction policy (LRU/LFU) and byte-based memory limits.
+- More eviction policies (LFU, volatile-only), a global (non-per-shard) memory budget, and an `INFO` command / API endpoint exposing `used_memory` and `evicted_keys`.
 - Authentication (TCP + API), rate limiting, metrics and tracing exports.
 - Binary-safe values; optional RESP compatibility; persistence (snapshots/AOF).
 - Pipelining and async connection multiplexing in the API client.

@@ -1,4 +1,4 @@
-use crate::store::Store;
+use crate::store::{EvictionPolicy, Store};
 use cache_proto::{Command, Response, MAX_LINE_LEN};
 use futures_util::{SinkExt, StreamExt};
 use std::future::Future;
@@ -16,6 +16,10 @@ pub struct Config {
     pub max_connections: usize,
     /// Approximate maximum number of stored keys.
     pub max_keys: usize,
+    /// Approximate maximum accounted memory in bytes (key + value + per-entry overhead).
+    pub max_memory_bytes: usize,
+    /// What to do when a write would exceed the key or memory limit.
+    pub eviction_policy: EvictionPolicy,
     /// A connection with no request for this long is closed.
     pub idle_timeout: Duration,
     /// How often expired keys are purged in the background.
@@ -23,11 +27,14 @@ pub struct Config {
 }
 
 impl Default for Config {
-    /// 1024 connections, 1,000,000 keys, 300 s idle timeout, 1 s sweep interval.
+    /// 1024 connections, 1,000,000 keys, 256 MiB memory, `allkeys-lru` eviction,
+    /// 300 s idle timeout, 1 s sweep interval.
     fn default() -> Self {
         Config {
             max_connections: 1024,
             max_keys: 1_000_000,
+            max_memory_bytes: 256 * 1024 * 1024,
+            eviction_policy: EvictionPolicy::AllKeysLru,
             idle_timeout: Duration::from_secs(300),
             sweep_interval: Duration::from_secs(1),
         }
@@ -41,7 +48,11 @@ impl Default for Config {
 /// * `config` - server limits and timings.
 /// * `shutdown` - future that completes when the server should stop (e.g. Ctrl-C).
 pub async fn run(listener: TcpListener, config: Config, shutdown: impl Future<Output = ()>) {
-    let store = Arc::new(Store::new(config.max_keys));
+    let store = Arc::new(Store::new(
+        config.max_keys,
+        config.max_memory_bytes,
+        config.eviction_policy,
+    ));
     let permits = Arc::new(Semaphore::new(config.max_connections));
     let (stop_tx, stop_rx) = watch::channel(false);
 
